@@ -1350,7 +1350,8 @@ async function main() {
       const payload = response.payload
       eq(payload.ok, true, 'ok')
       eq(payload.workspace.id, 'tmp-ws', 'workspace.id')
-      assert(payload.skills.length >= 20, `技能数偏少：${payload.skills.length}`)
+      // fixture 工作区自身 19 个技能；若机器上有用户级技能会更多，所以不按固定上限断言。
+      assert(payload.skills.length >= 19, `技能数偏少：${payload.skills.length}`)
       assert(payload.skills.some((skill) => skill.name === 'target'), 'skills 含 target')
       assert(payload.workflows.some((workflow) => workflow.skill === 'weird-flow' && workflow.defined), 'workflows 含 weird-flow')
       assert(Array.isArray(payload.shadowed), 'shadowed')
