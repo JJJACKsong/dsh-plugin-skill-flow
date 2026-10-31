@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "title": "示例工作流",
+  "nodes": [
+    { "id": "gate1", "kind": "decision", "label": "本次任务？" },
+    { "id": "n1", "skill": "example-skill", "label": "第一步" },
+    { "id": "n2", "skill": "example-skill-2", "label": "第二步" }
+  ],
+  "edges": [
+    { "from": "gate1", "to": "n1", "condition": "走这条" },
+    { "from": "n1", "to": "n2" }
+  ]
+}

@@ -1,0 +1,17 @@
+# dsh-plugin-skill-flow 的 bundle patch。
+#
+# 这个文件是 `dsh.bundle.patch` 指向的层：`plugin_manager` 用 `install_bundle`
+# 指向本目录（或 `dsh plugin --profile desktop add ./`）之后，
+# 安装器会把本包按真实包名写进 profile 的 `dsh.profile.bundles`，
+# profile boot / 热重组时合并本 patch——也就是 insert 下面这一行。
+# 所以不需要手工编辑 profile 的 cordis.patch.yml。
+#
+# ⚠️ 行 id 必须唯一：web-app 束已占用 `schedule`、`tools`、`timer` 等 id，
+#    同 id 的 insert 行后者会被 Loader 静默丢弃（装了但面板不出现）。
+#    `skill-flow` 目前未被占用，直接用。
+#
+# 本行不发布 Cordis service（只挂 HTTP 路由与客户端面板，见 lib/index.js 顶部注释），
+# 所以不需要 isolate realm。
+- insert:
+    - id: skill-flow
+      name: 'dsh-plugin-skill-flow'

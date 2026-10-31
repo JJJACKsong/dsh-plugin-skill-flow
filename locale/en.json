@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Skill Flow",
+    "description": "View and edit the node flow of workflow skills per workspace, scan loose skills, and run a cross-workspace check."
+  }
+}
