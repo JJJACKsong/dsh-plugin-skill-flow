@@ -12,6 +12,17 @@
 #
 # 本行不发布 Cordis service（只挂 HTTP 路由与客户端面板，见 lib/index.js 顶部注释），
 # 所以不需要 isolate realm。
+#
+# `sharedSkillRoots` 默认空：不信任任何本机路径，也不从工作区文件/软链推导权限。
+# Owner 可在 profile patch 中按下面的形状显式登记受信共享技能根：
+#   - id: skill-flow
+#     config:
+#       sharedSkillRoots:
+#         - path: /absolute/path/to/shared/skills
+#           writable: false
+#           label: Shared skills
 - insert:
     - id: skill-flow
       name: 'dsh-plugin-skill-flow'
+      config:
+        sharedSkillRoots: []

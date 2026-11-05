@@ -2,18 +2,18 @@
 // verify.mjs — skill-flow 宿主半自测（不依赖 Cordis，可在仓库里直接 `node verify.mjs`）。
 //
 // 覆盖契约 §7 的完成判据：
-//   1. 真实工作区扫描（默认取本仓库根；可用 SKILL_FLOW_WORKSPACE=/path/to/workspace 指定，
-//      找不到 <workspace>/skills 时本段自动 SKIP，只跑 fixture 段）：>=45 技能、description、
-//      箭头链、shadowed、loose/candidate；
+//   1. 可选工作区扫描（SKILL_FLOW_WORKSPACE=/path/to/workspace）：支持任意目录（含空目录），
+//      检查数据形状、计数自洽与只读边界，不要求具体技能、数量或目录拓扑；独立仓库默认跳过。
 //   2. frontmatter 边界：引号 / 块标量 / 布尔 / 缺字段 / 坏文件；
 //   3. flow.json 宽松归一与「读不重写」；
 //   4. validateDoc 拒绝非法文档；
 //   5. 临时工作区保存 round-trip、expected 冲突、删除改名、越权路径拒绝；
-//   6. 假 ctx 冒烟四个 HTTP 端点（状态码 / 头 / payload 形状 / 405）。
+//   6. 假 ctx 验证六个 HTTP 端点（原生认证 / 同源写检查 / 状态码 / payload）。
 //
 // 退出码：0 全绿；1 有失败。
 
 import { EventEmitter } from 'node:events'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -35,6 +35,7 @@ import {
   FLOW_DELETE_PATH,
   FLOW_PATH,
   INVOCATION_PATH,
+  INTENT_PATH,
   SKILL_PATH,
   STATE_PATH,
   apply,
@@ -53,9 +54,11 @@ const DEFAULT_WORKSPACE = resolve(HERE, '..', '..', '..')
 const REAL_WORKSPACE = process.env.SKILL_FLOW_WORKSPACE
   ? resolve(process.env.SKILL_FLOW_WORKSPACE)
   : DEFAULT_WORKSPACE
+// 显式给出 SKILL_FLOW_WORKSPACE 时，任意存在的目录都算（包括没有 skills/ 的空工作区）；
+// 未显式给出时，只有插件装在 <workspace>/dsh/plugins/skill-flow 布局下才去扫仓库根。
 const REAL_WORKSPACE_AVAILABLE =
-  (IN_WORKSPACE_LAYOUT || Boolean(process.env.SKILL_FLOW_WORKSPACE)) &&
-  (await directoryExists(join(REAL_WORKSPACE, 'skills')))
+  (Boolean(process.env.SKILL_FLOW_WORKSPACE) && (await directoryExists(REAL_WORKSPACE))) ||
+  (IN_WORKSPACE_LAYOUT && (await directoryExists(join(REAL_WORKSPACE, 'skills'))))
 
 async function directoryExists(path) {
   try {
@@ -217,15 +220,161 @@ async function buildFixtures(tmpRoot) {
   await makeSkill(agentsSkills, 'gamma', skillText('gamma', '丙技能（.agents）'))
   await makeSkill(sharedSkills, 'shared-skill', skillText('shared-skill', '上级共享技能'))
   await makeSkill(userSkills, 'global-skill', skillText('global-skill', '用户级技能'))
-  // 工作区放在用户级根旁边：dirname(ws)/skills 恰好等于用户级根（真实「记忆中枢」的形状）。
+  // 工作区放在用户级根旁边：dirname(ws)/skills 恰好等于用户级根（边界形状：共享根与用户级根同 realpath）。
   await makeSkill(join(home, 'nested-ws', 'skills'), 'nested-skill', skillText('nested-skill', '嵌套工作区技能'))
 
-  return { ws, home, wsSkills, sharedSkills }
+  // v2 归属用例单独放一棵 `v2-case/`：`dirname(ws)/skills` 与用户级根都不存在，
+  // 工作区扫描和全局工作区组扫到的是同一批技能，可以逐项对齐。
+  const v2Root = join(tmpRoot, 'v2-case')
+  const v2ws = join(v2Root, 'ws')
+  const v2Skills = join(v2ws, 'skills')
+  const v2Home = join(v2Root, 'home')
+
+  // 1) 没有任何判断节点的有序链：图上是一条链，但没有分支。
+  await makeSkill(v2Skills, 'chain-flow', skillText('chain-flow', '无判断节点的链式工作流'))
+  await makeSkill(v2Skills, 'chain-a', skillText('chain-a', '链第一站'))
+  await makeSkill(v2Skills, 'chain-b', skillText('chain-b', '链第二站'))
+  await makeSkill(v2Skills, 'chain-c', skillText('chain-c', '链第三站'))
+  await writeDeep(
+    join(v2Skills, 'chain-flow', FLOW_FILE_NAME),
+    JSON.stringify({
+      version: 2,
+      title: '链式工作流',
+      nodes: [
+        { id: 'a', skill: 'chain-a' },
+        { id: 'b', skill: 'chain-b' },
+        { id: 'c', skill: 'chain-c' },
+        // 引用不到现有技能的节点：只进 missing，不算 usage。
+        { id: 'ghost', skill: 'ghost-skill' },
+      ],
+      edges: [
+        { from: 'a', to: 'b' },
+        { from: 'b', to: 'c' },
+      ],
+    }),
+  )
+
+  // 2) 有判断节点 + 共享尾节点 + 没接进判断的普通节点。
+  for (const name of ['step-a', 'step-b', 'tail-shared', 'step-orphan', 'dup-step', 'rules-dep']) {
+    await makeSkill(v2Skills, name, skillText(name, `${name} 的说明`))
+  }
+  await makeSkill(v2Skills, 'branch-flow', skillText('branch-flow', '带判断节点的工作流'))
+  await writeDeep(
+    join(v2Skills, 'branch-flow', FLOW_FILE_NAME),
+    JSON.stringify({
+      version: 2,
+      title: '分支工作流',
+      nodes: [
+        { id: 'gate', kind: 'decision', label: '走哪条分支？' },
+        { id: 'a', skill: 'step-a' },
+        { id: 'b', skill: 'step-b' },
+        { id: 't', skill: 'tail-shared' },
+        // 没接进任何分支的普通节点：仍然属于这个工作流。
+        { id: 'orphan', skill: 'step-orphan' },
+        // 分支里已经能到的技能，又放了一个孤立节点：不应重复计数。
+        { id: 'dup-a', skill: 'step-a' },
+        // 同一个技能的两个孤立节点：按技能记一次。
+        { id: 'd1', skill: 'dup-step' },
+        { id: 'd2', skill: 'dup-step' },
+        // 只被 dep 边引用：不算 usage。
+        { id: 'p', skill: 'rules-dep', dep: true },
+      ],
+      edges: [
+        { from: 'gate', to: 'a', condition: '甲' },
+        { from: 'gate', to: 'b', condition: '乙' },
+        { from: 'a', to: 't' },
+        { from: 'b', to: 't' },
+        { from: 'p', to: 'b', kind: 'dep' },
+      ],
+    }),
+  )
+
+  // 3) v1 路线工作流：路线计数口径不变（v1-b 被两条路线引用 = 2）。
+  for (const name of ['v1-a', 'v1-b', 'v1-c']) {
+    await makeSkill(v2Skills, name, skillText(name, `${name} 的说明`))
+  }
+  await makeSkill(v2Skills, 'legacy-flow', skillText('legacy-flow', 'v1 路线工作流'))
+  await writeDeep(
+    join(v2Skills, 'legacy-flow', FLOW_FILE_NAME),
+    JSON.stringify({
+      version: 1,
+      title: 'v1 工作流',
+      routes: [
+        {
+          id: 'r1',
+          label: '路线一',
+          nodes: [
+            { id: 'n1', skill: 'v1-a' },
+            { id: 'n2', skill: 'v1-b' },
+            { id: 'n3', skill: 'v1-c' },
+          ],
+          edges: [],
+        },
+        { id: 'r2', label: '路线二', nodes: [{ id: 'n1', skill: 'v1-b' }], edges: [] },
+      ],
+    }),
+  )
+
+  // 4) 别名归属用例：目录名 `example-alias` 声明 `name: example-step`，三条 v2 无分支流程
+  //    引用这个别名（其中一条同时放了别名节点和正式名节点，按实际技能记录去重）。
+  const aliasRoot = join(tmpRoot, 'alias-case')
+  const aliasWs = join(aliasRoot, 'ws')
+  const aliasSkills = join(aliasWs, 'skills')
+  const aliasHome = join(aliasRoot, 'home')
+  const aliasV1Ws = join(aliasRoot, 'v1ws')
+  const aliasV1Skills = join(aliasV1Ws, 'skills')
+  const aliasSkillText = '---\nname: example-step\ndescription: 别名用例技能\n---\n\n# example-step\n'
+
+  await makeSkill(aliasSkills, 'example-alias', aliasSkillText)
+  const aliasFlows = [
+    ['example-flow-a', [{ id: 'n1', skill: 'example-alias' }]],
+    ['example-flow-b', [{ id: 'n1', skill: 'example-alias' }]],
+    [
+      'example-flow-dup',
+      [
+        { id: 'n1', skill: 'example-alias' },
+        { id: 'n2', skill: 'example-step' },
+        // 引用不到现有技能的节点：只进 missing，不影响归属。
+        { id: 'n3', skill: 'example-ghost' },
+      ],
+    ],
+  ]
+  for (const [flow, nodes] of aliasFlows) {
+    await makeSkill(aliasSkills, flow, skillText(flow, `${flow} 的说明`))
+    await writeDeep(join(aliasSkills, flow, FLOW_FILE_NAME), JSON.stringify({ version: 2, nodes, edges: [] }))
+  }
+
+  // v1 历史口径对照：同一条别名记录被 v1 路线引用。
+  await makeSkill(aliasV1Skills, 'example-alias', aliasSkillText)
+  await makeSkill(aliasV1Skills, 'legacy-alias-flow', skillText('legacy-alias-flow', 'v1 别名工作流'))
+  await writeDeep(
+    join(aliasV1Skills, 'legacy-alias-flow', FLOW_FILE_NAME),
+    JSON.stringify({
+      version: 1,
+      title: 'legacy-alias',
+      routes: [{ id: 'r1', label: '路线一', nodes: [{ id: 'n1', skill: 'example-alias' }], edges: [] }],
+    }),
+  )
+
+  return {
+    ws,
+    home,
+    wsSkills,
+    sharedSkills,
+    v2: { ws: v2ws, home: v2Home, skills: v2Skills },
+    alias: { ws: aliasWs, home: aliasHome, skills: aliasSkills, v1ws: aliasV1Ws, v1skills: aliasV1Skills },
+  }
 }
 
 // ── 假 ctx（HTTP 冒烟）────────────────────────────────────────────────────
 
-function makeFakeCtx({ workspaces, sessions }) {
+/**
+ * 假 ctx。`auth` 是原生认证服务的替身：
+ *   - 省略 / undefined → 放行（`requestRejection` 返回 undefined）
+ *   - `null`           → 服务缺失（fail-closed 用例）
+ *   - `{requestRejection}` → 模拟 401 / 403 / 抛错 / 未知判定
+ */
+function makeFakeCtx({ workspaces, sessions, auth }) {
   const registrations = []
   const ctx = {
     webServer: {
@@ -247,6 +396,7 @@ function makeFakeCtx({ workspaces, sessions }) {
       return typeof dispose === 'function' ? dispose : () => {}
     },
   }
+  if (auth !== null) ctx.connection = auth ?? { requestRejection: () => undefined }
   return { ctx, registrations }
 }
 
@@ -266,10 +416,19 @@ function makeResponse() {
   }
 }
 
-function makeRequest(method, url, body) {
+/** 正常同源请求的默认头：写请求是 JSON + 同源 Origin，读请求只带 Host。 */
+const SAME_ORIGIN_POST_HEADERS = {
+  'content-type': 'application/json',
+  host: 'localhost:4173',
+  origin: 'http://localhost:4173',
+}
+const PLAIN_GET_HEADERS = { host: 'localhost:4173' }
+
+function makeRequest(method, url, body, headers) {
   const request = new EventEmitter()
   request.method = method
   request.url = url
+  request.headers = headers ?? (method === 'GET' ? PLAIN_GET_HEADERS : SAME_ORIGIN_POST_HEADERS)
   request.setEncoding = () => {}
   queueMicrotask(() => {
     if (body !== undefined) request.emit('data', typeof body === 'string' ? body : JSON.stringify(body))
@@ -278,12 +437,12 @@ function makeRequest(method, url, body) {
   return request
 }
 
-async function callRoute(registrations, path, method, url, body) {
+async function callRoute(registrations, path, method, url, body, headers) {
   const registration = registrations.find((item) => item.path === path)
   assert(registration, `没有注册路由 ${path}`)
   assert(registration.kind === 'exact', `${path} 的 kind 必须是 exact`)
   const response = makeResponse()
-  const request = makeRequest(method, url, body)
+  const request = makeRequest(method, url, body, headers)
   await registration.handler(request, response)
   let payload = null
   try {
@@ -303,204 +462,195 @@ async function main() {
     fixtures = await buildFixtures(tmpRoot)
 
     // ══════════════════════════════════════════════════════════════════════
-    section('1. 真实工作区扫描（SKILL_FLOW_WORKSPACE 可指定；缺失时跳过）')
+    section('1. 公开扫描不变量（SKILL_FLOW_WORKSPACE 可指向任意工作区，含空工作区）')
     // ══════════════════════════════════════════════════════════════════════
+    // 这一段只断言「对任意工作区都成立」的公开契约：形状、计数自洽、用户级根只读、
+    // 已定义工作流的图结构合法、坏数据被记成 issue。它不假设任何具体技能名、技能数量、
+    // 目录拓扑或作者的业务结构 —— 空工作区、普通工作区、缺 description、坏 flow.json 都要跑得通。
 
-    const realWorkspaceAvailable = REAL_WORKSPACE_AVAILABLE
     let real = null
-    if (!realWorkspaceAvailable) {
-      console.log(`  SKIP 真实工作区扫描：${REAL_WORKSPACE} 下没有 skills/（用 SKILL_FLOW_WORKSPACE=/path/to/workspace 指定）`)
+    if (!REAL_WORKSPACE_AVAILABLE) {
+      console.log(`  SKIP 公开扫描不变量：${REAL_WORKSPACE} 不可用（用 SKILL_FLOW_WORKSPACE=<任意工作区> 指定）`)
     } else {
-
     real = await scanWorkspace(REAL_WORKSPACE)
-    const realNames = new Set(real.skills.map((skill) => skill.name))
 
-    await test('扫描到 >=45 个技能', () => {
-      assert(real.skills.length >= 45, `只扫到 ${real.skills.length} 个技能`)
-    })
-
-    await test('五个技能根都出现在 roots 里（含不存在的 .agents）', () => {
-      eq(real.roots.length, 5, 'roots 数量')
-      eq(real.roots.map((root) => root.key).join(','), 'ws-skills,ws-dsh-skills,ws-agents-skills,shared-skills,user-skills', 'roots 顺序')
-      const writable = real.roots.filter((root) => root.writable).map((root) => root.key)
-      eq(
-        writable.join(','),
-        'ws-skills,ws-dsh-skills,ws-agents-skills,shared-skills',
-        '用户级根必须只读',
-      )
-    })
-
-    await test('每个技能 description 非空', () => {
-      const empty = real.skills.filter((skill) => !skill.description)
-      assert(empty.length === 0, `空 description：${empty.map((skill) => skill.name).join(', ')}`)
-    })
-
-    await test('SkillView 字段形状完整', () => {
-      const sample = real.skills.find((skill) => skill.name === 'jd-union')
-      assert(sample, '缺少 jd-union')
-      for (const key of [
-        'name',
-        'description',
-        'source',
-        'sourceLabel',
-        'rootPath',
-        'path',
-        'dir',
-        'userInvocable',
-        'modelInvocable',
-        'isWorkflow',
-        'flowPath',
-        'usage',
-        'usedBy',
-        'loose',
-        'workflowCandidate',
-        'chains',
-        'issues',
-      ]) {
-        assert(key in sample, `SkillView 缺字段 ${key}`)
+    await test('任意工作区都能扫：SkillView 形状完整', () => {
+      assert(Array.isArray(real.skills), 'skills 必须是数组')
+      eq(new Set(real.skills.map((skill) => skill.name)).size, real.skills.length, '技能名必须唯一')
+      assert(Array.isArray(real.workflows), 'workflows 必须是数组')
+      assert(Array.isArray(real.shadowed), 'shadowed 必须是数组')
+      for (const skill of real.skills) {
+        assert(typeof skill.name === 'string' && skill.name.length > 0, 'name 不能为空')
+        assert(typeof skill.description === 'string', 'description 必须是字符串（缺失用空串）')
+        assert(['workspace', 'shared', 'global'].includes(skill.source), `source 非法：${skill.source}`)
+        assert(typeof skill.sourceLabel === 'string' && skill.sourceLabel.length > 0, 'sourceLabel 不能为空')
+        assert(typeof skill.path === 'string' && skill.path.endsWith(SKILL_FILE_NAME), 'path 必须指向 SKILL.md')
+        assert(typeof skill.dir === 'string' && skill.dir.length > 0, 'dir 不能为空')
+        assert(typeof skill.isWorkflow === 'boolean', 'isWorkflow 必须是布尔')
+        assert(typeof skill.loose === 'boolean', 'loose 必须是布尔')
+        assert(typeof skill.usage === 'number' && skill.usage >= 0, 'usage 必须是非负数字')
+        assert(Array.isArray(skill.usedBy) && Array.isArray(skill.chains) && Array.isArray(skill.issues), '数组字段')
+        assert(typeof skill.userInvocable === 'boolean' && typeof skill.modelInvocable === 'boolean', '调用开关必须是布尔')
+        for (const chain of skill.chains) assert(Array.isArray(chain) && chain.length >= 2, 'chains 每条至少两个技能')
       }
-      assert(Array.isArray(sample.chains), 'chains 必须是数组')
-      assert(Array.isArray(sample.usedBy), 'usedBy 必须是数组')
     })
 
-    await test('commercial-workflow 箭头链含 spoken-draft 与 script-fact-check', () => {
-      const commercial = real.skills.find((skill) => skill.name === 'commercial-workflow')
-      assert(commercial, '缺少 commercial-workflow')
-      const flat = commercial.chains.flat()
-      assert(flat.includes('spoken-draft'), `链里没有 spoken-draft：${JSON.stringify(commercial.chains)}`)
-      assert(flat.includes('script-fact-check'), `链里没有 script-fact-check：${JSON.stringify(commercial.chains)}`)
-      assert(commercial.chains.length >= 1 && commercial.chains.length <= 6, '链数量应为 1–6')
-      assert(commercial.workflowCandidate === true, 'commercial-workflow 应是 workflowCandidate')
+    await test('缺 description / 坏 flow 记为 issue，而不是让扫描失败', () => {
+      for (const skill of real.skills) {
+        if (skill.description === '') {
+          assert(skill.issues.includes('missing-description'), `${skill.name} 缺 description 却没有对应 issue`)
+        }
+        assert(
+          skill.issues.every((issue) => ['missing-description', 'missing-name', 'flow-parse-error'].includes(issue)),
+          `${skill.name} 出现未知 issue：${JSON.stringify(skill.issues)}`,
+        )
+      }
     })
 
-    await test('shadowed 含 jd-union，且 symlink 根不重复记 shadowed', () => {
-      assert(
-        real.shadowed.some((item) => item.name === 'jd-union' && item.sourceLabel === '上级共享'),
-        `shadowed 里没有 jd-union：${JSON.stringify(real.shadowed)}`,
-      )
-      assert(
-        !real.shadowed.some((item) => item.sourceLabel === '工作区 .dsh'),
-        `工作区 .dsh 是 skills 的符号链接，不应产生 shadowed：${JSON.stringify(real.shadowed)}`,
-      )
-      const dshRoot = real.roots.find((root) => root.key === 'ws-dsh-skills')
-      assert(dshRoot?.duplicateOf === 'ws-skills', '.dsh/skills 应标记 duplicateOf=ws-skills')
+    await test('roots：key 唯一、source 合法、用户级根永远只读', () => {
+      assert(real.roots.length >= 1, 'roots 至少要有工作区根')
+      const keys = real.roots.map((root) => root.key)
+      eq(new Set(keys).size, keys.length, 'root key 必须唯一')
+      assert(keys.includes('ws-skills'), `缺少工作区根：${JSON.stringify(keys)}`)
+      for (const root of real.roots) {
+        assert(typeof root.key === 'string' && root.key.length > 0, 'root.key')
+        assert(typeof root.label === 'string' && root.label.length > 0, 'root.label')
+        assert(typeof root.path === 'string' && root.path.length > 0, 'root.path')
+        assert(['workspace', 'shared', 'global'].includes(root.source), `root.source 非法：${root.source}`)
+        assert(typeof root.exists === 'boolean' && typeof root.writable === 'boolean', 'root 布尔字段')
+        if (root.source === 'global') assert(root.writable === false, '用户级根必须只读')
+        if (root.exists === false) assert(root.writable === false, '不存在的根不应可写')
+      }
     })
 
-    await test('loose / candidate 计数合理', () => {
+    await test('validation.summary 与各数组计数自洽', () => {
       const summary = real.validation.summary
       eq(summary.skills, real.skills.length, 'summary.skills')
       eq(summary.workflows, real.workflows.length, 'summary.workflows')
-      assert(summary.candidates >= 3, `candidate 太少：${summary.candidates}`)
-      assert(summary.candidates <= Math.floor(summary.skills / 2), `candidate 太多：${summary.candidates}`)
-      if (real.workflows.length > 0) {
-        // 有 flow.json 时，被引用/有定义的技能不应算 loose
-        assert(summary.loose < summary.skills, `loose 应小于技能总数：${summary.loose}/${summary.skills}`)
-        eq(summary.defined, real.workflows.filter((workflow) => workflow.defined).length, 'summary.defined')
-        assert(real.skills.some((skill) => skill.usage > 0), '有工作流时应至少有一个技能被引用')
-      } else {
-        eq(summary.loose, summary.skills, '没有 flow.json 时所有技能都应是 loose')
-      }
+      eq(summary.defined, real.workflows.filter((workflow) => workflow.defined).length, 'summary.defined')
+      eq(summary.loose, real.skills.filter((skill) => skill.loose).length, 'summary.loose')
+      eq(summary.candidates, real.skills.filter((skill) => skill.workflowCandidate).length, 'summary.candidates')
+      eq(summary.missingRefs, real.validation.missing.length, 'summary.missingRefs')
+      assert(summary.defined <= summary.workflows, 'defined 不能多于 workflows')
+      assert(summary.loose <= summary.skills, 'loose 不能多于 skills')
     })
 
-    await test('WorkflowView 形状 + defined 时带 expected（契约 §2.3 补充）', () => {
-      assert(real.workflows.length >= 1, '真实工作区应至少有一个 flow.json（引导数据）')
+    await test('每个 defined 工作流都是合法图（v1 / v2 形状 + 引用闭合）', () => {
       for (const workflow of real.workflows) {
-        assert(workflow.skill, 'workflow.skill 不能为空')
-        assert(typeof workflow.title === 'string' && workflow.title.length > 0, 'workflow.title 不能为空')
+        assert(typeof workflow.skill === 'string' && workflow.skill.length > 0, 'workflow.skill')
+        assert(typeof workflow.title === 'string' && workflow.title.length > 0, 'workflow.title')
         assert(workflow.flowPath.endsWith(FLOW_FILE_NAME), 'flowPath 必须指向 flow.json')
-        assert(typeof workflow.headTitle === 'string', 'headTitle 必须是字符串')
-        assert(typeof workflow.headText === 'string', 'headText 必须是字符串')
+        assert(typeof workflow.headTitle === 'string' && typeof workflow.headText === 'string', '工作流头是字符串')
+        if (!workflow.defined) continue
+        assert(workflow.expected, `${workflow.skill}：defined=true 时必须带 expected`)
         if (workflow.version === 2) {
-          assert(Array.isArray(workflow.nodes), 'v2 nodes 必须是数组')
-          assert(Array.isArray(workflow.edges), 'v2 edges 必须是数组')
-          assert(Array.isArray(workflow.branches), 'v2 branches 必须是数组')
-          assert(workflow.expected, 'v2 defined=true 时必须带 expected')
+          assert(Array.isArray(workflow.nodes) && Array.isArray(workflow.edges), 'v2 nodes/edges 必须是数组')
           const ids = new Set(workflow.nodes.map((node) => node.id))
-          eq(ids.size, workflow.nodes.length, 'v2 节点 id 唯一')
+          eq(ids.size, workflow.nodes.length, `${workflow.skill}：v2 节点 id 唯一`)
+          eq(workflow.routeCount, 0, `${workflow.skill}：v2 routeCount 为 0`)
+          eq(
+            workflow.nodeCount,
+            workflow.nodes.filter((node) => !node.dep && node.kind !== 'decision').length,
+            `${workflow.skill}：v2 nodeCount 只数技能节点`,
+          )
           for (const node of workflow.nodes) {
             assert(typeof node.x === 'number' && typeof node.y === 'number', 'v2 node 坐标必须是数字')
-            if (node.kind === 'decision') assert(node.label, 'decision 节点需要 label')
-            else assert(node.skill, 'v2 node.skill 不能为空')
+            if (node.kind === 'decision') assert(node.label && !node.skill, '判断节点要有 label、不带 skill')
+            else assert(typeof node.skill === 'string' && node.skill.length > 0, 'v2 技能节点要有 skill')
           }
           for (const edge of workflow.edges) {
-            assert(ids.has(edge.from) && ids.has(edge.to), 'v2 edge 必须引用现有节点')
+            assert(ids.has(edge.from) && ids.has(edge.to), `${workflow.skill}：v2 边的端点必须存在`)
             assert(edge.kind === 'flow' || edge.kind === 'dep', `edge.kind 非法：${edge.kind}`)
-            if (edge.condition !== undefined) assert(typeof edge.condition === 'string', 'condition 必须是字符串')
           }
-          eq(workflow.routeCount, 0, 'v2 routeCount 为 0')
+          for (const branch of workflow.branches) {
+            assert(ids.has(branch.from) && ids.has(branch.to), 'v2 分支端点必须存在')
+            assert(typeof branch.condition === 'string', 'v2 分支条件是字符串')
+          }
         } else {
-          assert(Array.isArray(workflow.routes), 'routes 必须是数组')
-          eq(workflow.routeCount, workflow.routes.length, 'routeCount')
+          assert(Array.isArray(workflow.routes), 'v1 routes 必须是数组')
+          eq(workflow.routeCount, workflow.routes.length, `${workflow.skill}：routeCount`)
           eq(
             workflow.nodeCount,
             workflow.routes.reduce((sum, route) => sum + route.nodes.length, 0),
-            'nodeCount',
+            `${workflow.skill}：nodeCount`,
           )
-          if (workflow.defined) {
-            assert(workflow.expected, 'defined=true 时必须带 expected')
-            assert(typeof workflow.expected.mtimeMs === 'number' && Number.isFinite(workflow.expected.mtimeMs), 'expected.mtimeMs')
-            assert(typeof workflow.expected.size === 'number' && Number.isFinite(workflow.expected.size), 'expected.size')
-            for (const route of workflow.routes) {
-              assert(route.id && route.label, 'route 需要 id/label')
-              for (const node of route.nodes) {
-                assert(typeof node.x === 'number' && typeof node.y === 'number', 'node 坐标必须是数字')
-                assert(node.skill, 'node.skill 不能为空')
-              }
-              for (const edge of route.edges) {
-                assert(edge.kind === 'flow' || edge.kind === 'dep', `edge.kind 非法：${edge.kind}`)
-              }
+          for (const route of workflow.routes) {
+            assert(route.id && route.label, 'route 需要 id/label')
+            for (const node of route.nodes) {
+              assert(typeof node.x === 'number' && typeof node.y === 'number', 'node 坐标必须是数字')
+              assert(typeof node.skill === 'string' && node.skill.length > 0, 'node.skill 不能为空')
             }
-          } else {
-            assert(workflow.expected === undefined, 'defined=false 时不应带 expected')
-            assert(workflow.flowError, 'defined=false 时应带 flowError')
+            const nodeIds = new Set(route.nodes.map((node) => node.id))
+            for (const edge of route.edges) {
+              assert(nodeIds.has(edge.from) && nodeIds.has(edge.to), `${workflow.skill}：v1 边的端点必须存在`)
+              assert(edge.kind === 'flow' || edge.kind === 'dep', `edge.kind 非法：${edge.kind}`)
+            }
           }
         }
       }
     })
 
-    await test('工作流头：从 SKILL.md 入口段提取（listing / commercial）', () => {
-      const listing = real.workflows.find((workflow) => workflow.skill === 'listing-workflow')
-      assert(listing, '缺少 listing-workflow')
-      assert(/接单|停止点|分支/.test(listing.headTitle), `listing headTitle 不含入口关键词：${listing.headTitle}`)
-      assert(typeof listing.headText === 'string' && listing.headText.length > 20, 'listing headText 过短')
-      const commercial = real.workflows.find((workflow) => workflow.skill === 'commercial-workflow')
-      if (commercial) assert(/分支|停止点/.test(commercial.headTitle), `commercial headTitle：${commercial.headTitle}`)
-    })
-
-    await test('validation.missing 形状与引用一致', () => {
+    await test('坏 flow.json 记成 flowError 并进入 warnings（不是静默丢工作流）', () => {
+      const broken = real.workflows.filter((workflow) => workflow.defined === false)
+      for (const workflow of broken) {
+        assert(typeof workflow.flowError === 'string' && workflow.flowError.length > 0, `${workflow.skill}：缺 flowError`)
+        assert(
+          real.validation.warnings.some((warning) => warning.includes(workflow.skill)),
+          `${workflow.skill}：坏 flow.json 没有进入 warnings`,
+        )
+      }
       assert(Array.isArray(real.validation.missing), 'missing 必须是数组')
       for (const item of real.validation.missing) {
-        assert(item.workflow && item.nodeId !== undefined && item.skill, 'missing 条目形状')
+        assert(item.workflow && item.nodeId !== undefined && typeof item.skill === 'string', 'missing 条目形状')
       }
-      assert(Array.isArray(real.validation.warnings), 'warnings 必须是数组')
-      assert(realNames instanceof Set && realNames.size === real.skills.length, '技能名应唯一')
     })
 
-    await test('全局视图：分组 / duplicates / summary', async () => {
-      const global = await scanGlobal([{ id: 'demo', title: '示例工作区', path: REAL_WORKSPACE }])
-      assert(global.groups.length >= 3, `全局视图应有 workspace/shared/user 三组：${global.groups.length}`)
-      const kinds = new Set(global.groups.map((group) => group.kind))
-      assert(kinds.has('workspace') && kinds.has('shared') && kinds.has('user'), `分组类型缺失：${[...kinds]}`)
+    await test('usage / usedBy / loose 三个派生字段互相自洽', () => {
+      for (const skill of real.skills) {
+        eq(skill.usage > 0, skill.usedBy.length > 0, `${skill.name}：usage 与 usedBy 应对应`)
+        eq(skill.loose, !skill.isWorkflow && skill.usage === 0, `${skill.name}：loose 定义`)
+        assert(new Set(skill.usedBy).size === skill.usedBy.length, `${skill.name}：usedBy 不应重复`)
+      }
+      for (const entry of real.shadowed) {
+        assert(entry.name && entry.sourceLabel && typeof entry.rootPath === 'string', 'shadowed 条目形状')
+      }
+      const shadowNames = real.shadowed.map((entry) => entry.name)
+      eq(new Set(shadowNames).size, shadowNames.length, 'shadowed 名字不应重复')
+    })
 
-      const workspaceGroup = global.groups.find((group) => group.kind === 'workspace')
-      assert(workspaceGroup, '缺少 workspace 组')
-      assert(workspaceGroup.counts.skills >= 45, 'workspace 组技能数过少')
+    await test('全局视图：分组 / duplicates / summary 自洽', async () => {
+      const global = await scanGlobal([{ id: 'demo', title: '示例工作区', path: REAL_WORKSPACE }])
+      assert(Array.isArray(global.groups) && global.groups.length >= 1, 'groups 至少 1 组')
+      const kinds = new Set(global.groups.map((group) => group.kind))
+      for (const kind of kinds) assert(['workspace', 'shared', 'user'].includes(kind), `group.kind 非法：${kind}`)
+      const workspaceGroup = global.groups.find((group) => group.kind === 'workspace' && group.path === resolve(REAL_WORKSPACE))
+      assert(workspaceGroup, '缺少被查询工作区的 workspace 组')
+      // workspace 组只算工作区根 1–3 的技能；scanWorkspace 还含 shared / 用户级根，所以按 source 过滤后比对。
+      const projectSkillNames = new Set(real.skills.filter((skill) => skill.source === 'workspace').map((skill) => skill.name))
+      eq(
+        workspaceGroup.counts.skills,
+        real.skills.filter((skill) => skill.source === 'workspace').length,
+        'workspace 组技能数应与工作区根扫描一致',
+      )
+      eq(
+        workspaceGroup.counts.workflows,
+        real.workflows.filter((workflow) => projectSkillNames.has(workflow.skill)).length,
+        'workspace 组工作流数应与工作区根扫描一致',
+      )
+      eq(workspaceGroup.counts.loose, workspaceGroup.looseSkills.length, 'workspace 组 loose 计数应与列表一致')
       assert(Array.isArray(workspaceGroup.looseSkills), 'looseSkills 必须是数组')
       for (const loose of workspaceGroup.looseSkills) {
         assert(loose.name && typeof loose.description === 'string', 'looseSkills 形状')
         assert(typeof loose.workflowCandidate === 'boolean', 'looseSkills.workflowCandidate')
       }
-
-      const listing = workspaceGroup.workflows.find((workflow) => workflow.skill === 'listing-workflow')
-      assert(listing && listing.defined, 'listing-workflow 应是 defined 工作流')
-      assert(listing.sharedSkills.includes('spoken-draft'), `sharedSkills 应含 spoken-draft：${JSON.stringify(listing.sharedSkills)}`)
-      assert(listing.sharedSkills.includes('script-fact-check'), 'sharedSkills 应含 script-fact-check')
-      assert(typeof listing.missingRefs === 'number', 'missingRefs 必须是数字')
-
-      assert(
-        global.duplicates.some((item) => item.name === 'jd-union' && item.groups.length >= 2),
-        `duplicates 应含 jd-union：${JSON.stringify(global.duplicates)}`,
-      )
+      for (const workflow of workspaceGroup.workflows) {
+        assert(workflow.skill && typeof workflow.title === 'string', 'group workflow 形状')
+        assert(typeof workflow.missingRefs === 'number', 'missingRefs 必须是数字')
+        assert(Array.isArray(workflow.sharedSkills), 'sharedSkills 必须是数组')
+      }
+      for (const duplicate of global.duplicates) {
+        assert(duplicate.name && Array.isArray(duplicate.groups) && duplicate.groups.length >= 2, 'duplicates 形状')
+      }
       eq(global.summary.groups, global.groups.length, 'summary.groups')
       eq(
         global.summary.skills,
@@ -903,6 +1053,252 @@ async function main() {
     })
 
     // ══════════════════════════════════════════════════════════════════════
+    section('6b. v2 单图：非分支节点的归属（usage / usedBy / loose）')
+    // ══════════════════════════════════════════════════════════════════════
+    // 归属口径：分支可达的非 dep 技能一分支一次（共享尾节点就是多次）；任何分支都覆盖不到的
+    // 普通技能节点再按技能补记一次 —— 无判断节点的有序链、没接进判断的孤立节点都因此属于这个
+    // 工作流。这里只有「谁属于谁」，不发明判断节点、条件、路径或执行顺序。
+
+    const v2Scan = await scanWorkspace(fixtures.v2.ws, { dshHome: fixtures.v2.home })
+    const v2Skill = (name) => v2Scan.skills.find((skill) => skill.name === name)
+    const v2Workflow = (name) => v2Scan.workflows.find((workflow) => workflow.skill === name)
+
+    await test('v2 无判断节点的有序链：链上每个技能都归属这个工作流', () => {
+      const chain = v2Workflow('chain-flow')
+      assert(chain && chain.defined && chain.version === 2, 'chain-flow 应是 defined 的 v2 工作流')
+      eq(chain.branches.length, 0, '没有判断节点就没有分支')
+      eq(chain.nodeCount, 4, 'nodeCount 仍按节点数（含引用不到技能的那个节点）')
+      for (const name of ['chain-a', 'chain-b', 'chain-c']) {
+        const skill = v2Skill(name)
+        eq(skill.usage, 1, `${name} 应被算一次`)
+        eq(JSON.stringify(skill.usedBy), JSON.stringify(['链式工作流']), `${name} 的 usedBy 应指向该工作流`)
+        eq(skill.loose, false, `${name} 不再是编外技能`)
+      }
+    })
+
+    await test('v2 判断分支的共享尾节点仍是一分支一次', () => {
+      const branch = v2Workflow('branch-flow')
+      eq(branch.branches.length, 2, 'branch-flow 两个分支')
+      eq(v2Skill('tail-shared').usage, 2, '共享尾节点被两条分支各引用一次')
+      eq(v2Skill('tail-shared').usedBy.length, 1, 'usedBy 按工作流去重')
+      eq(v2Skill('tail-shared').usedBy[0], '分支工作流', 'usedBy 是工作流 title')
+    })
+
+    await test('v2 分支可达的技能不因多一个同名孤立节点而涨 usage', () => {
+      const branch = v2Workflow('branch-flow')
+      eq(branch.nodes.filter((node) => node.skill === 'step-a').length, 2, '图里确实有两个 step-a 节点')
+      eq(v2Skill('step-a').usage, 1, 'step-a 在分支里已经算过，孤立节点不再加')
+      eq(v2Skill('step-b').usage, 1, 'step-b 一次')
+    })
+
+    await test('v2 没接进判断的普通节点按技能记一次', () => {
+      const orphan = v2Skill('step-orphan')
+      eq(orphan.usage, 1, '孤立普通节点也算这个工作流的引用')
+      eq(JSON.stringify(orphan.usedBy), JSON.stringify(['分支工作流']), 'orphan usedBy')
+      eq(orphan.loose, false, 'orphan 不再是编外技能')
+      eq(v2Skill('dup-step').usage, 1, '同一技能的两个孤立节点只算一次')
+      eq(v2Skill('dup-step').usedBy.length, 1, 'dup-step usedBy 去重')
+    })
+
+    await test('v2 只用 dep 边引用的技能不算 usage', () => {
+      const dep = v2Skill('rules-dep')
+      eq(dep.usage, 0, 'dep 节点不计数')
+      eq(JSON.stringify(dep.usedBy), '[]', 'dep 节点不产生 usedBy')
+      eq(dep.loose, true, 'dep-only 技能仍是编外技能')
+    })
+
+    await test('v2 引用不到现有技能的节点只进 missing，不产生 usage', () => {
+      assert(!v2Scan.skills.some((skill) => skill.name === 'ghost-skill'), 'ghost-skill 不应是技能记录')
+      const ghost = v2Scan.validation.missing.find((item) => item.skill === 'ghost-skill')
+      assert(ghost, `missing 应含 ghost-skill：${JSON.stringify(v2Scan.validation.missing)}`)
+      eq(ghost.workflow, 'chain-flow', 'missing.workflow')
+      eq(ghost.nodeId, 'ghost', 'missing.nodeId')
+      eq(
+        v2Scan.validation.missing.filter((item) => item.skill === 'ghost-skill').length,
+        1,
+        'missing 仍按节点报一次',
+      )
+    })
+
+    await test('v1 路线计数保持不变', () => {
+      const legacy = v2Workflow('legacy-flow')
+      eq(legacy.version, 1, 'v1 版本')
+      eq(legacy.routeCount, 2, 'v1 两条路线')
+      eq(v2Skill('v1-b').usage, 2, '被两条路线引用的技能算两次')
+      eq(v2Skill('v1-a').usage, 1, 'v1-a 一次')
+      eq(v2Skill('v1-c').usage, 1, 'v1-c 一次')
+      eq(JSON.stringify(v2Skill('v1-b').usedBy), JSON.stringify(['v1 工作流']), 'v1 usedBy')
+    })
+
+    await test('全局分组复用同一套归属口径（loose / shared 一致）', async () => {
+      const global = await scanGlobal(
+        [{ id: 'v2-case', title: 'v2 用例', path: fixtures.v2.ws }],
+        { dshHome: fixtures.v2.home },
+      )
+      const group = global.groups.find((entry) => entry.kind === 'workspace')
+      assert(group, `缺 workspace 组：${JSON.stringify(global.groups.map((entry) => entry.kind))}`)
+      const workspaceLoose = v2Scan.skills
+        .filter((skill) => skill.loose)
+        .map((skill) => skill.name)
+        .sort()
+      eq(
+        JSON.stringify(group.looseSkills.map((skill) => skill.name)),
+        JSON.stringify(workspaceLoose),
+        '全局组的编外技能应与工作区扫描一致',
+      )
+      eq(group.counts.loose, workspaceLoose.length, 'counts.loose 与列表一致')
+      for (const name of ['chain-a', 'chain-b', 'chain-c', 'step-orphan', 'dup-step', 'tail-shared']) {
+        assert(
+          !group.looseSkills.some((skill) => skill.name === name),
+          `${name} 已归属工作流，不应出现在编外技能里`,
+        )
+      }
+      assert(group.looseSkills.some((skill) => skill.name === 'rules-dep'), 'dep-only 技能仍应算编外')
+      const branchEntry = group.workflows.find((workflow) => workflow.skill === 'branch-flow')
+      eq(
+        JSON.stringify(branchEntry.sharedSkills),
+        JSON.stringify(['tail-shared']),
+        'sharedSkills 只含被两条分支共用的技能',
+      )
+      const chainEntry = group.workflows.find((workflow) => workflow.skill === 'chain-flow')
+      eq(JSON.stringify(chainEntry.sharedSkills), '[]', '无分支的链没有共享技能')
+      eq(chainEntry.missingRefs, 1, 'missingRefs 仍按节点统计')
+    })
+
+    await test('归属统计只读：扫描前后 SKILL.md / flow.json 字节不变', async () => {
+      const snapshot = async () => {
+        const out = {}
+        for (const entry of await readdir(fixtures.v2.skills, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue
+          for (const file of [SKILL_FILE_NAME, FLOW_FILE_NAME]) {
+            const path = join(fixtures.v2.skills, entry.name, file)
+            if (!existsSync(path)) continue
+            const info = await stat(path)
+            out[`${entry.name}/${file}`] = { size: info.size, mtimeMs: info.mtimeMs, text: await readFile(path, 'utf8') }
+          }
+        }
+        return out
+      }
+      const before = await snapshot()
+      await scanWorkspace(fixtures.v2.ws, { dshHome: fixtures.v2.home })
+      await scanGlobal([{ id: 'v2-case', path: fixtures.v2.ws }], { dshHome: fixtures.v2.home })
+      const after = await snapshot()
+      eq(JSON.stringify(after), JSON.stringify(before), '扫描不应改写任何技能字节')
+    })
+
+    // ══════════════════════════════════════════════════════════════════════
+    section('6c. v2 别名归属：节点写别名时按实际技能记录归组')
+    // ══════════════════════════════════════════════════════════════════════
+    // 目录名 `example-alias` 声明 `name: example-step`：节点里写的是目录名，记录名是正式名。
+    // 计数已经按记录归一，工作流的「自己有哪些技能」也必须用同一把尺子，否则全局视图会把
+    // 共享技能算成空。v1 的历史按名口径保持不动。
+
+    const aliasScan = await scanWorkspace(fixtures.alias.ws, { dshHome: fixtures.alias.home })
+    const aliasStep = () => aliasScan.skills.find((skill) => skill.name === 'example-step')
+
+    await test('别名目录只产出一条记录：usage / usedBy 按记录累计', () => {
+      const step = aliasStep()
+      assert(step, `缺 example-step 记录：${JSON.stringify(aliasScan.skills.map((skill) => skill.name))}`)
+      eq(JSON.stringify(step.aliasNames), JSON.stringify(['example-alias']), '目录名收进 aliasNames')
+      assert(
+        !aliasScan.skills.some((skill) => skill.name === 'example-alias'),
+        '别名不应单独成为技能记录',
+      )
+      eq(step.usage, 3, '三条工作流各一次（dup 里别名 + 正式名两个孤立节点只算一次）')
+      eq(
+        JSON.stringify(step.usedBy),
+        JSON.stringify(['example-flow-a', 'example-flow-b', 'example-flow-dup']),
+        'usedBy 按工作流去重',
+      )
+      eq(step.loose, false, '有归属就不是编外技能')
+    })
+
+    await test('同一流程里的别名节点与正式名节点按记录去重（只算一次）', () => {
+      const dup = aliasScan.workflows.find((workflow) => workflow.skill === 'example-flow-dup')
+      assert(dup && dup.defined, 'example-flow-dup 应是 defined v2')
+      eq(dup.nodeCount, 3, 'dup 图里三个技能节点')
+      eq(dup.branches.length, 0, '无判断节点')
+      eq(aliasStep().usage - 2, 1, 'dup 只给这条记录贡献 1 次，不是 2 次')
+    })
+
+    await test('全局分组：v2 的 sharedSkills 用记录名（别名归到正式名）', async () => {
+      const global = await scanGlobal(
+        [{ id: 'alias-case', title: '别名用例', path: fixtures.alias.ws }],
+        { dshHome: fixtures.alias.home },
+      )
+      const group = global.groups.find((entry) => entry.kind === 'workspace')
+      assert(group, '缺 workspace 组')
+      for (const name of ['example-flow-a', 'example-flow-b', 'example-flow-dup']) {
+        const entry = group.workflows.find((workflow) => workflow.skill === name)
+        eq(
+          JSON.stringify(entry.sharedSkills),
+          JSON.stringify(['example-step']),
+          `${name} 应把 example-step 报成共享技能`,
+        )
+      }
+      eq(JSON.stringify(group.looseSkills.map((skill) => skill.name)), '[]', '别名技能不应再算编外')
+      eq(
+        group.workflows.find((workflow) => workflow.skill === 'example-flow-dup').missingRefs,
+        1,
+        'missingRefs 仍按节点上的原始技能名统计（example-ghost）',
+      )
+      eq(
+        group.workflows.find((workflow) => workflow.skill === 'example-flow-a').missingRefs,
+        0,
+        '引用别名的节点不算 missing',
+      )
+    })
+
+    await test('v1 保持历史按名口径（分组不归一别名）', async () => {
+      const v1Scan = await scanWorkspace(fixtures.alias.v1ws, { dshHome: fixtures.alias.home })
+      const step = v1Scan.skills.find((skill) => skill.name === 'example-step')
+      eq(step.usage, 1, '工作区扫描仍按记录累计 v1 路线引用')
+      eq(step.loose, false, 'v1 引用也算归属')
+      const global = await scanGlobal(
+        [{ id: 'alias-v1', title: 'v1 别名', path: fixtures.alias.v1ws }],
+        { dshHome: fixtures.alias.home },
+      )
+      const group = global.groups.find((entry) => entry.kind === 'workspace')
+      const entry = group.workflows.find((workflow) => workflow.skill === 'legacy-alias-flow')
+      eq(entry.version, 1, 'v1')
+      eq(JSON.stringify(entry.sharedSkills), '[]', '一条路线没有共享技能')
+      // 历史行为（明确保留）：v1 分组计数仍按节点上的技能名，因此这条别名记录仍会出现在
+      // 全局组的编外列表里。本次只修 v2，不顺手改 v1。
+      assert(
+        group.looseSkills.some((skill) => skill.name === 'example-step'),
+        'v1 分组仍是按名计数（历史口径）',
+      )
+    })
+
+    await test('别名用例只读：扫描前后字节不变', async () => {
+      const snapshot = async (root) => {
+        const out = {}
+        for (const entry of await readdir(root, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue
+          for (const file of [SKILL_FILE_NAME, FLOW_FILE_NAME]) {
+            const path = join(root, entry.name, file)
+            if (!existsSync(path)) continue
+            const info = await stat(path)
+            out[`${root}/${entry.name}/${file}`] = { size: info.size, mtimeMs: info.mtimeMs, text: await readFile(path, 'utf8') }
+          }
+        }
+        return out
+      }
+      const before = {
+        ...(await snapshot(fixtures.alias.skills)),
+        ...(await snapshot(fixtures.alias.v1skills)),
+      }
+      await scanWorkspace(fixtures.alias.ws, { dshHome: fixtures.alias.home })
+      await scanGlobal([{ id: 'alias-case', path: fixtures.alias.ws }], { dshHome: fixtures.alias.home })
+      await scanWorkspace(fixtures.alias.v1ws, { dshHome: fixtures.alias.home })
+      const after = {
+        ...(await snapshot(fixtures.alias.skills)),
+        ...(await snapshot(fixtures.alias.v1skills)),
+      }
+      eq(JSON.stringify(after), JSON.stringify(before), '扫描不应改写任何技能字节')
+    })
+
+    // ══════════════════════════════════════════════════════════════════════
     section('7. 保存 / 冲突 / 删除 / 路径守卫')
     // ══════════════════════════════════════════════════════════════════════
 
@@ -1111,24 +1507,24 @@ async function main() {
 
     const graphDoc = () => ({
       version: 2,
-      title: ' 清单月更 ',
+      title: ' 示例工作流 ',
       updatedAt: '2000-01-01T00:00:00.000Z',
       unknownTop: 'keep-v2',
       nodes: [
         {
           id: 'gate1',
           kind: 'decision',
-          label: '本次主编要求？',
+          label: '走哪条分支？',
           skill: 'drop-me',
           x: 40,
           y: 432,
           unknownNode: 'drop',
         },
-        { id: 'n1', skill: ' target ', label: ' 核价·点位 ', x: 999999, y: -999999, unknownNode: 'drop' },
+        { id: 'n1', skill: ' target ', label: ' 步骤 A ', x: 999999, y: -999999, unknownNode: 'drop' },
         { id: 'p1', skill: 'ghost-skill', dep: true },
       ],
       edges: [
-        { from: 'gate1', to: 'n1', condition: ' 更新上月产品价格/点位 ' },
+        { from: 'gate1', to: 'n1', condition: ' 分支 A ' },
         { from: 'n1', to: 'p1', kind: 'dep' },
         { from: 'p1', to: 'n1' },
       ],
@@ -1138,7 +1534,7 @@ async function main() {
       const result = validateDoc(graphDoc())
       assert(result.ok === true, `应接受 v2：${result.error}`)
       eq(result.doc.version, 2, 'version')
-      eq(result.doc.title, '清单月更', 'title trim')
+      eq(result.doc.title, '示例工作流', 'title trim')
       eq(result.doc.unknownTop, 'keep-v2', '未知顶层字段保留')
       eq(result.doc.updatedAt, '2000-01-01T00:00:00.000Z', 'updatedAt 原样保留（保存时覆写）')
       eq(result.doc.routes, undefined, 'v2 不补 routes')
@@ -1146,14 +1542,14 @@ async function main() {
 
       const decision = result.doc.nodes[0]
       eq(decision.kind, 'decision', 'decision.kind')
-      eq(decision.label, '本次主编要求？', 'decision.label')
+      eq(decision.label, '走哪条分支？', 'decision.label')
       eq(decision.skill, undefined, 'decision 丢弃 skill')
       eq(decision.x, 40, 'decision.x')
       eq(decision.y, 432, 'decision.y')
 
       const normal = result.doc.nodes[1]
       eq(normal.skill, 'target', 'skill trim')
-      eq(normal.label, '核价·点位', 'label trim')
+      eq(normal.label, '步骤 A', 'label trim')
       eq(normal.x, 20000, 'x clamp 上限')
       eq(normal.y, -20000, 'y clamp 下限')
       eq(normal.unknownNode, undefined, '节点未知字段丢弃')
@@ -1164,7 +1560,7 @@ async function main() {
       eq(depNode.y, 0, 'y 缺省 0')
 
       eq(result.doc.edges.length, 3, 'edges 数量')
-      eq(result.doc.edges[0].condition, '更新上月产品价格/点位', 'condition trim')
+      eq(result.doc.edges[0].condition, '分支 A', 'condition trim')
       eq(result.doc.edges[0].kind, 'flow', '缺省 kind 归一 flow')
       eq(result.doc.edges[1].kind, 'dep', '显式 dep')
       eq(result.doc.edges[2].from, 'p1', '边顺序保持')
@@ -1250,7 +1646,7 @@ async function main() {
       eq(parsed.routes, undefined, 'v2 文件不写 routes')
       assert(Array.isArray(parsed.nodes) && parsed.nodes.length === 3, 'nodes')
       assert(Array.isArray(parsed.edges) && parsed.edges.length === 3, 'edges')
-      eq(parsed.title, '清单月更', 'title')
+      eq(parsed.title, '示例工作流', 'title')
       eq(parsed.unknownTop, 'keep-v2', '未知顶层字段保留')
       assert(
         typeof parsed.updatedAt === 'string' && !Number.isNaN(Date.parse(parsed.updatedAt)),
@@ -1308,13 +1704,17 @@ async function main() {
       sessions: [{ header: { cwd: join(fixtures.ws, 'skills', 'target') } }],
     })
 
-    await test('inject 与五个 exact 路由', () => {
-      eq(JSON.stringify(inject), JSON.stringify(['webServer', 'workspaceRegistry', 'sessions']), 'inject')
+    await test('inject 与六个 exact 路由（旧五个保持）', () => {
+      eq(
+        JSON.stringify(inject),
+        JSON.stringify(['webServer', 'workspaceRegistry', 'sessions', 'connection']),
+        'inject（connection 是原生认证的硬依赖）',
+      )
       apply(fake.ctx)
-      eq(fake.registrations.length, 5, '路由数量')
+      eq(fake.registrations.length, 6, '路由数量')
       eq(
         fake.registrations.map((item) => `${item.kind} ${item.path}`).join(','),
-        `exact ${STATE_PATH},exact ${SKILL_PATH},exact ${FLOW_PATH},exact ${FLOW_DELETE_PATH},exact ${INVOCATION_PATH}`,
+        `exact ${INTENT_PATH},exact ${STATE_PATH},exact ${SKILL_PATH},exact ${FLOW_PATH},exact ${FLOW_DELETE_PATH},exact ${INVOCATION_PATH}`,
         '路由表',
       )
       for (const registration of fake.registrations) {
@@ -1567,28 +1967,182 @@ async function main() {
     })
 
     // ══════════════════════════════════════════════════════════════════════
+    section('8b. 原生认证闸门 + 写请求闸门')
+    // ══════════════════════════════════════════════════════════════════════
+
+    // 探针技能：没有 flow.json，用来证明「被拒的写请求不落盘」。
+    const authProbeDir = join(fixtures.ws, 'skills', 'auth-probe')
+    await mkdir(authProbeDir, { recursive: true })
+    const authProbeSkill = join(authProbeDir, 'SKILL.md')
+    const authProbeBody = '---\nname: auth-probe\ndescription: gate probe\n---\n\n# probe\n'
+    await writeFile(authProbeSkill, authProbeBody)
+    const authProbeFlow = join(authProbeDir, FLOW_FILE_NAME)
+    const gateWorkspace = [{ id: 'tmp-ws', title: '临时工作区', path: fixtures.ws }]
+    const gateSessions = [{ header: { cwd: join(fixtures.ws, 'skills', 'target') } }]
+    const mountGated = (auth) => {
+      const fakeGate = makeFakeCtx({ workspaces: gateWorkspace, sessions: gateSessions, auth })
+      apply(fakeGate.ctx)
+      return fakeGate.registrations
+    }
+    const saveAuthProbe = {
+      workspaceId: 'tmp-ws',
+      skill: 'auth-probe',
+      doc: { version: 2, title: 'probe', nodes: [{ id: 'n1', skill: 'auth-probe' }], edges: [] },
+    }
+
+    await test('原生认证服务缺失：读写都 fail closed（503，不返回任何数据）', async () => {
+      const routes = mountGated(null)
+      const read = await callRoute(routes, STATE_PATH, 'GET', `${STATE_PATH}?workspaceId=tmp-ws`)
+      eq(read.status, 503, '读状态码')
+      eq(read.payload.ok, false, '读 ok')
+      eq(read.payload.code, 'unavailable', '读 code')
+      eq(read.payload.skills, undefined, '不得返回技能数据')
+      const write = await callRoute(routes, FLOW_PATH, 'POST', FLOW_PATH, saveAuthProbe)
+      eq(write.status, 503, '写状态码')
+      eq(write.payload.ok, false, '写 ok')
+      eq(existsSync(authProbeFlow), false, '服务缺失时不得落盘')
+    })
+
+    await test('原生认证服务抛错 / 返回未知判定：一律按拒绝处理', async () => {
+      const throwing = mountGated({ requestRejection() { throw new Error('boom') } })
+      const thrown = await callRoute(throwing, STATE_PATH, 'GET', STATE_PATH)
+      eq(thrown.status, 503, '抛错状态码')
+      eq(thrown.payload.code, 'unavailable', '抛错 code')
+      const weird = mountGated({ requestRejection: () => 418 })
+      const unknown = await callRoute(weird, FLOW_PATH, 'POST', FLOW_PATH, saveAuthProbe)
+      eq(unknown.status, 503, '未知判定状态码')
+      eq(unknown.payload.ok, false, '未知判定 ok')
+      eq(existsSync(authProbeFlow), false, '未知判定不得落盘')
+    })
+
+    await test('原生认证 401：六个路由全部被拦，且没有任何写入', async () => {
+      const routes = mountGated({ requestRejection: () => 401 })
+      for (const [path, method, url, body] of [
+        [STATE_PATH, 'GET', `${STATE_PATH}?workspaceId=tmp-ws`, undefined],
+        [SKILL_PATH, 'GET', `${SKILL_PATH}?workspaceId=tmp-ws&name=auth-probe`, undefined],
+        [FLOW_PATH, 'POST', FLOW_PATH, saveAuthProbe],
+        [FLOW_DELETE_PATH, 'POST', FLOW_DELETE_PATH, { workspaceId: 'tmp-ws', skill: 'auth-probe' }],
+        [INVOCATION_PATH, 'POST', INVOCATION_PATH, { workspaceId: 'tmp-ws', skill: 'auth-probe', userInvocable: false }],
+        [INTENT_PATH, 'POST', INTENT_PATH, { action: 'list', workspaceId: 'tmp-ws' }],
+      ]) {
+        const response = await callRoute(routes, path, method, url, body)
+        eq(response.status, 401, `${path} 状态码`)
+        eq(response.payload.ok, false, `${path} ok`)
+        eq(response.payload.code, 'unauthorized', `${path} code`)
+        eq(response.headers['content-type'], 'application/json; charset=utf-8', `${path} content-type`)
+      }
+      eq(existsSync(authProbeFlow), false, '401 时不得创建 flow.json')
+      eq(await readFile(authProbeSkill, 'utf8'), authProbeBody, '401 时不得改 SKILL.md')
+      eq(existsSync(join(fixtures.ws, '.skill-flow')), false, '401 时不得创建导图草稿目录')
+    })
+
+    await test('原生认证 403（Host/Origin fence）：同样被拦', async () => {
+      const routes = mountGated({ requestRejection: () => 403 })
+      const read = await callRoute(routes, STATE_PATH, 'GET', `${STATE_PATH}?workspaceId=tmp-ws`)
+      eq(read.status, 403, '读状态码')
+      eq(read.payload.code, 'forbidden', '读 code')
+      const write = await callRoute(routes, FLOW_PATH, 'POST', FLOW_PATH, saveAuthProbe)
+      eq(write.status, 403, '写状态码')
+      eq(write.payload.code, 'forbidden', '写 code')
+      eq(existsSync(authProbeFlow), false, '403 时不得落盘')
+    })
+
+    await test('认证先于方法判断：未认证的错方法也回 401 而不是 405', async () => {
+      const routes = mountGated({ requestRejection: () => 401 })
+      const response = await callRoute(routes, STATE_PATH, 'POST', STATE_PATH, {})
+      eq(response.status, 401, '状态码')
+      eq(response.payload.code, 'unauthorized', 'code')
+    })
+
+    await test('写闸门覆盖所有 POST 路径：非 JSON / 跨站 / 非同源 Origin 都被拒', async () => {
+      const routes = mountGated(undefined)
+      const posts = [
+        [FLOW_PATH, saveAuthProbe],
+        [FLOW_DELETE_PATH, { workspaceId: 'tmp-ws', skill: 'auth-probe' }],
+        [INVOCATION_PATH, { workspaceId: 'tmp-ws', skill: 'auth-probe', userInvocable: false }],
+        [INTENT_PATH, { action: 'list', workspaceId: 'tmp-ws' }],
+      ]
+      const cases = [
+        ['非 JSON', { host: 'localhost:4173', origin: 'http://localhost:4173' }, 'invalid-doc'],
+        ['text/plain', { 'content-type': 'text/plain', host: 'localhost:4173', origin: 'http://localhost:4173' }, 'invalid-doc'],
+        ['跨站 sec-fetch-site', { ...SAME_ORIGIN_POST_HEADERS, 'sec-fetch-site': 'cross-site' }, 'readonly'],
+        ['异源 Origin', { 'content-type': 'application/json', host: 'localhost:4173', origin: 'https://attacker.example' }, 'readonly'],
+        ['同源但 Origin 端口不同', { 'content-type': 'application/json', host: 'localhost:4173', origin: 'http://localhost:4174' }, 'readonly'],
+        ['Origin 为非法值', { 'content-type': 'application/json', host: 'localhost:4173', origin: 'null' }, 'readonly'],
+      ]
+      for (const [path, body] of posts) {
+        for (const [label, headers, code] of cases) {
+          const response = await callRoute(routes, path, 'POST', path, body, headers)
+          eq(response.status, 200, `${path} ${label} 状态码（写闸门保持 200 + ok:false）`)
+          eq(response.payload.ok, false, `${path} ${label} ok`)
+          eq(response.payload.code, code, `${path} ${label} code`)
+        }
+      }
+      eq(existsSync(authProbeFlow), false, '被闸门拒绝的写请求不得落盘')
+      eq(await readFile(authProbeSkill, 'utf8'), authProbeBody, '被闸门拒绝的写请求不得改 SKILL.md')
+    })
+
+    await test('写闸门先于读请求体：跨站 + 坏 JSON 仍回 readonly', async () => {
+      const routes = mountGated(undefined)
+      const response = await callRoute(routes, FLOW_PATH, 'POST', FLOW_PATH, '{not json', {
+        ...SAME_ORIGIN_POST_HEADERS,
+        'sec-fetch-site': 'cross-site',
+      })
+      eq(response.payload.code, 'readonly', 'code')
+      eq(response.payload.ok, false, 'ok')
+    })
+
+    await test('同源 JSON 正常放行：四个写路由都能进入 handler', async () => {
+      const routes = mountGated(undefined)
+      const saved = await callRoute(routes, FLOW_PATH, 'POST', FLOW_PATH, saveAuthProbe)
+      eq(saved.payload.ok, true, `保存应成功：${JSON.stringify(saved.payload)}`)
+      eq(existsSync(authProbeFlow), true, '同源 JSON 保存落盘')
+      const invocation = await callRoute(routes, INVOCATION_PATH, 'POST', INVOCATION_PATH, {
+        workspaceId: 'tmp-ws',
+        skill: 'auth-probe',
+        userInvocable: false,
+      })
+      eq(invocation.payload.ok, true, `调用开关应成功：${JSON.stringify(invocation.payload)}`)
+      const list = await callRoute(routes, INTENT_PATH, 'POST', INTENT_PATH, { action: 'list', workspaceId: 'tmp-ws' })
+      assert(
+        !['invalid-doc', 'readonly', 'unauthorized', 'forbidden', 'unavailable'].includes(list.payload.code),
+        `导图请求应通过闸门：${JSON.stringify(list.payload)}`,
+      )
+      const deleted = await callRoute(routes, FLOW_DELETE_PATH, 'POST', FLOW_DELETE_PATH, {
+        workspaceId: 'tmp-ws',
+        skill: 'auth-probe',
+      })
+      eq(deleted.payload.ok, true, `删除应成功：${JSON.stringify(deleted.payload)}`)
+      const read = await callRoute(routes, STATE_PATH, 'GET', `${STATE_PATH}?workspaceId=tmp-ws`)
+      eq(read.payload.ok, true, '读在认证放行后照常返回')
+    })
+
+    // ══════════════════════════════════════════════════════════════════════
     section('9. 默认工作区推断')
     // ══════════════════════════════════════════════════════════════════════
 
     await test('最后一个有 cwd 的会话最长前缀匹配；匹配不到回落注册表第一个', () => {
+      // An isolated plugin at /private/tmp can resolve DEFAULT_WORKSPACE to '/'.
+      // Use the real fixture instead of testing unrelated root-prefix behavior.
+      const testWorkspace = fixtures.ws
       const workspaces = [
         { id: 'first', path: '/tmp/w1' },
-        { id: 'dream', path: REAL_WORKSPACE },
+        { id: 'alpha', path: testWorkspace },
       ]
       eq(
         pickDefaultWorkspaceId({
           workspaces,
-          sessions: [{ header: { cwd: '/tmp/w1' } }, { header: { cwd: join(REAL_WORKSPACE, 'skills') } }],
+          sessions: [{ header: { cwd: '/tmp/w1' } }, { header: { cwd: join(testWorkspace, 'skills') } }],
         }),
-        'dream',
+        'alpha',
         '最长前缀匹配',
       )
       eq(
         pickDefaultWorkspaceId({
           workspaces,
-          sessions: [{ header: { cwd: join(REAL_WORKSPACE, 'skills') } }],
+          sessions: [{ header: { cwd: join(testWorkspace, 'skills') } }],
         }),
-        'dream',
+        'alpha',
         '只有一条会话',
       )
       eq(
@@ -1600,8 +2154,8 @@ async function main() {
         '匹配不到回落第一个',
       )
       eq(
-        pickDefaultWorkspaceId({ workspaces, sessions: [{ cwd: REAL_WORKSPACE }] }),
-        'dream',
+        pickDefaultWorkspaceId({ workspaces, sessions: [{ cwd: testWorkspace }] }),
+        'alpha',
         '兼容直接 cwd 形状',
       )
       eq(pickDefaultWorkspaceId({ workspaces, sessions: [] }), 'first', '没有会话时取第一个')

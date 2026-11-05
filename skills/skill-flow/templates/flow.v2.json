@@ -2,12 +2,12 @@
   "version": 2,
   "title": "示例工作流",
   "nodes": [
-    { "id": "gate1", "kind": "decision", "label": "本次任务？" },
-    { "id": "n1", "skill": "example-skill", "label": "第一步" },
-    { "id": "n2", "skill": "example-skill-2", "label": "第二步" }
+    { "id": "gate1", "kind": "decision", "label": "走哪条分支？" },
+    { "id": "n1", "skill": "example-step-a", "label": "步骤 A" },
+    { "id": "n2", "skill": "example-step-b", "label": "步骤 B" }
   ],
   "edges": [
-    { "from": "gate1", "to": "n1", "condition": "走这条" },
+    { "from": "gate1", "to": "n1", "condition": "分支 A" },
     { "from": "n1", "to": "n2" }
   ]
 }

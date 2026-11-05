@@ -1,6 +1,6 @@
 ---
 name: skill-flow
-description: 可视化管理工作流图：在工作流技能目录里读写 flow.json（节点=技能、判断节点=分支条件、共享节点只画一次），校验结构、加删分支、v1 迁 v2。只写 flow.json，绝不改 SKILL.md。用户说「技能流」「工作流图」「把流程画出来」「检查 flow.json」时用；不装技能流插件也能用。
+description: 读写工作流技能目录里的 flow.json：补图、加删分支、v1 迁 v2、校验结构；只写 flow.json，不动 SKILL.md。装了技能流插件可以看图，不装插件也能用。
 user-invocable: true
 disable-model-invocation: true
 ---
@@ -8,6 +8,10 @@ disable-model-invocation: true
 # 技能流：工作流图
 
 `flow.json` 是工作流技能目录里的一张图，跟 `SKILL.md` 同级、跟着技能走：复制或搬走技能目录，图就跟着走。技能流插件（如果装了）负责把它画出来；没有插件，这张图照样能读、能改、能 diff、能被 Agent 当阅读索引。
+
+## 协作方式
+
+用户通过斜杠命令发起后，由 Agent 自行阅读相关技能正文、梳理关系并产出 `flow.json`。校验通过后，让用户在图上判断产出是否正确、是否符合自己的想法，再根据反馈调整。有歧义时标出并询问；信息足够时直接产出供查看。
 
 ## 绝对不改动 SKILL.md
 
@@ -17,18 +21,21 @@ disable-model-invocation: true
 
 ## 数据长什么样（version 2）
 
+下面这张图全是虚构占位：`example-step-a` / `example-step-b` / `example-rules` 不是任何真实技能；实际用时换成工作区里已有的技能，或先建同名技能。
+
 ```json
 {
   "version": 2,
-  "title": "清单月更",
+  "title": "示例工作流",
   "nodes": [
-    { "id": "gate1", "kind": "decision", "label": "本次主编要求？" },
-    { "id": "n1", "skill": "jd-union", "label": "核价·点位" },
-    { "id": "p1", "skill": "account-tone", "dep": true }
+    { "id": "gate1", "kind": "decision", "label": "走哪条分支？" },
+    { "id": "n1", "skill": "example-step-a", "label": "步骤 A" },
+    { "id": "n2", "skill": "example-step-b", "label": "步骤 B" },
+    { "id": "p1", "skill": "example-rules", "dep": true }
   ],
   "edges": [
-    { "from": "gate1", "to": "n1", "condition": "更新上月产品价格/点位", "stopAt": "n1" },
-    { "from": "n1", "to": "n2" },
+    { "from": "gate1", "to": "n1", "condition": "分支 A", "stopAt": "n1" },
+    { "from": "gate1", "to": "n2", "condition": "分支 B" },
     { "from": "p1", "to": "n2", "kind": "dep" }
   ]
 }
@@ -40,7 +47,7 @@ disable-model-invocation: true
 | `nodes[].skill` | 技能目录名，必须真实存在（允许先画后建） |
 | `nodes[].label` | 图上显示的中文短名（≤12 字），可省略（省略显示技能名） |
 | `nodes[].kind: "decision"` | 判断节点，不是技能；必须有 `label`，不能带 `skill` / `dep` |
-| `nodes[].dep: true` | 规则依赖（写作前要读的语气/逻辑/品类），画成目标节点下方的小 chip |
+| `nodes[].dep: true` | 规则依赖（执行前必须先读的规则/约束），画成目标节点下方的小 chip |
 | `edges[].condition` | 判断节点出边的分支条件，≤14 字，用 SKILL.md 原话 |
 | `edges[].stopAt` | 这条分支走到哪个节点就停；值是节点 id |
 | `edges[].kind: "dep"` | 依赖边（dep 节点 → 目标节点），不参与流程 |
@@ -48,21 +55,21 @@ disable-model-invocation: true
 
 ## 画图的六条约定
 
-1. **一个判断节点**：放最左边，问题用主编原话（「本次任务？」「本期跑哪个阶段？」）。
+1. **一个判断节点**：放最左边，问题用技能正文里的原话（例如「本次任务？」「走哪条分支？」）。
 2. **分支来自技能**：每条 `condition` 都能在 SKILL.md 找到对应的一句。
-3. **共享节点只画一次**：两条分支都经过 `script-fact-check`，就只留一个节点，两边连到它，分支在那里汇合。
+3. **共享节点只画一次**：如果两条分支都要经过同一个技能，就只留一个节点，两边连到它，分支在那里汇合。
 4. **条件要短**：≤14 字，一眼看出「这次走哪条」。
-5. **规则依赖用 dep**：account-tone / bottom-writing-logic / 品类 Pack 这类「写之前先读」的，用 `dep:true` 挂到目标节点。
+5. **规则依赖用 dep**：`example-rules` 这类「动手前先读」的规则、约束，用 `dep:true` 挂到目标节点。
 6. **停止点标出来**：SKILL.md 写了「停在哪里」，就用 `stopAt` 标在这条分支的边上。
 
 ## 三种常见操作
 
 ### A. 新建一张图（给已有工作流技能补图）
 
-1. 读该技能的 `SKILL.md`，找出「分支与停止点 / 阶段路由 / 默认调度」；
-2. 先用文字列给用户确认：判断问题 → 每条分支的条件 → 该分支的技能链 → 停在哪；
-3. 确认后写 `skills/<workflow>/flow.json`；
-4. 跑校验，通过后让用户刷新技能流面板查看。
+1. 读该技能的 `SKILL.md` 及相关技能，梳理分支、依赖与停止点；
+2. 依据技能正文生成 `skills/<workflow>/flow.json`；有歧义时先标出并询问；
+3. 跑校验，修正结构错误；
+4. 通过后让用户刷新技能流面板看图，判断是否正确、符合想法，再根据反馈调整。
 
 > 新建一个全新的工作流技能时：`SKILL.md` 的写法走 `writing-for-agents`，`flow.json` 用 `templates/flow.v2.json` 起手，两者放在同一个技能目录里。
 

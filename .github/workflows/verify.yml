@@ -12,4 +12,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # 四套行为回归 + 发布契约校验（离线、零依赖、不调用模型）。
       - run: node verify.mjs
+      - run: node verify-intent.mjs
+      - run: node verify-nested.mjs
+      - run: node verify-editing.mjs
+      - run: node verify-release.mjs
+      # 真实打包检查：确认 tarball 里确实有 README 承诺的 skills/、docs/、CHANGELOG.md。
+      - run: npm pack --dry-run --ignore-scripts

@@ -5,6 +5,8 @@
  * 用法：node check-flow.mjs <技能目录 | flow.json 路径>
  *
  * 只做结构校验，不依赖技能流插件；装了插件时两边规则保持一致（v2）。
+ * 用户级技能根与插件扫描器一致：`DSH_HOME` 优先，缺省 `~/.dsh`。把 `DSH_HOME` 指到临时目录，
+ * 就能在完全不碰真实用户目录的前提下跑校验（发布检查就是这么用的）。
  * 退出码：0 通过 / 1 有错误 / 2 用法或文件问题。
  */
 import fs from 'node:fs'
@@ -83,7 +85,11 @@ if (path.basename(parent) === 'skills') {
   const workspace = path.dirname(parent)
   skillRoots.push(path.join(workspace, '.dsh', 'skills'), path.join(workspace, '.agents', 'skills'))
 }
-skillRoots.push(path.join(os.homedir(), '.dsh', 'skills'))
+// 用户级根：`DSH_HOME` 优先（与插件扫描器一致），缺省 `~/.dsh`；不用改 HOME 就能把用户根指到临时目录。
+const dshHome = typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME.trim()
+  ? process.env.DSH_HOME.trim()
+  : path.join(os.homedir(), '.dsh')
+skillRoots.push(path.join(dshHome, 'skills'))
 const knownSkills = new Set(skillRoots.flatMap((root) => [...namesIn(root)]))
 
 // ── v1：能读，提示迁移 ────────────────────────────────────────────────────

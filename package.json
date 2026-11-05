@@ -16,10 +16,17 @@
     "cordis.patch.yml",
     "locale",
     "icon.svg",
+    "skills",
+    "docs",
     "README.md",
     "README.en.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
+  "scripts": {
+    "test": "node verify.mjs && node verify-intent.mjs && node verify-nested.mjs && node verify-editing.mjs && node verify-release.mjs",
+    "test:release": "node verify-release.mjs"
+  },
   "keywords": [
     "dsh",
     "deepseek-harness",
@@ -59,6 +66,11 @@
       "inject": [
         "@deepseek-ai/dsh-client-locale"
       ]
+    }
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
     }
   }
 }
