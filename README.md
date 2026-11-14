@@ -3,6 +3,7 @@
 **把「工作流结构」从 `SKILL.md` 里拆出来，变成一张可以看、可以改的图。**
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/dsh-plugin-skill-flow.svg)](https://www.npmjs.com/package/dsh-plugin-skill-flow)
 [![dsh](https://img.shields.io/badge/dsh-%3E%3D0.1.5--rc.2-4f8ef7.svg)](#兼容性)
 
 > **English**: Skill Flow is a DeepSeek Harness plugin that visualizes and edits the node flow of

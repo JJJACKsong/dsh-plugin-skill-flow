@@ -3,6 +3,7 @@
 **Split the structure of a workflow out of `SKILL.md` and make it a graph you can see and edit.**
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/dsh-plugin-skill-flow.svg)](https://www.npmjs.com/package/dsh-plugin-skill-flow)
 [![dsh](https://img.shields.io/badge/dsh-%3E%3D0.1.5--rc.2-4f8ef7.svg)](#compatibility)
 
 Skill Flow is a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that visualizes and
