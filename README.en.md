@@ -42,7 +42,7 @@ User-level skills under `~/.dsh/skills` are read-only in the UI.
 
 ## Install
 
-Download `dsh-plugin-skill-flow-0.1.0.tgz` and `SHA256SUMS` from [GitHub Releases](https://github.com/JJJACKsong/dsh-plugin-skill-flow/releases/latest). Extract the package for a desktop plugin directory, or install the tarball directly into a Web profile. The package is not on npm yet.
+Published on npm as `dsh-plugin-skill-flow`. You can also download `dsh-plugin-skill-flow-0.1.1.tgz` and `SHA256SUMS` from [GitHub Releases](https://github.com/JJJACKsong/dsh-plugin-skill-flow/releases/latest): extract the package for a desktop plugin directory, or install the tarball directly into a Web profile.
 
 **Desktop (Electron app)** — add the local checkout through the app's plugin manager. Available entry points and installation sources depend on your DSH build. The app manages its own desktop profile; the CLI does not support `--profile desktop`.
 
@@ -50,12 +50,12 @@ Download `dsh-plugin-skill-flow-0.1.0.tgz` and `SHA256SUMS` from [GitHub Release
 
 ```bash
 dsh plugin --profile web add /absolute/path/to/dsh-plugin-skill-flow
-dsh plugin --profile web add /absolute/path/to/dsh-plugin-skill-flow-0.1.0.tgz
+dsh plugin --profile web add /absolute/path/to/dsh-plugin-skill-flow-0.1.1.tgz
 ```
 
 Relative paths resolve against your current directory. `dsh plugin` forwards installation arguments to pnpm in the selected profile.
 
-**From npm (not published yet; this command is currently unavailable)**:
+**From npm**:
 
 ```bash
 dsh plugin --profile web add dsh-plugin-skill-flow

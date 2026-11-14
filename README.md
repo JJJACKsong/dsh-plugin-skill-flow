@@ -45,7 +45,7 @@
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/JJJACKsong/dsh-plugin-skill-flow/releases/latest) 下载 `dsh-plugin-skill-flow-0.1.0.tgz` 和 `SHA256SUMS`。解压包可作为桌面插件源码目录，Web profile 可直接安装 tarball。npm 暂未发布。
+已发布到 npm（`dsh-plugin-skill-flow`）。也可以从 [GitHub Releases](https://github.com/JJJACKsong/dsh-plugin-skill-flow/releases/latest) 下载 `dsh-plugin-skill-flow-0.1.1.tgz` 和 `SHA256SUMS`；解压包可作为桌面插件源码目录，Web profile 可直接安装 tarball。
 
 **桌面版（Electron 应用）**：通过应用自带的插件管理器添加本地源码目录。具体入口和支持的安装源以你所用的 DSH 版本为准。桌面 profile 由应用管理，CLI 不支持 `--profile desktop`。
 
@@ -53,12 +53,12 @@
 
 ```bash
 dsh plugin --profile web add /absolute/path/to/dsh-plugin-skill-flow
-dsh plugin --profile web add /absolute/path/to/dsh-plugin-skill-flow-0.1.0.tgz
+dsh plugin --profile web add /absolute/path/to/dsh-plugin-skill-flow-0.1.1.tgz
 ```
 
 相对路径按执行命令时的当前目录解析。`dsh plugin` 会将安装参数转给所选 profile 的 pnpm。
 
-**从 npm（暂未发布，以下命令当前不可用）**：
+**从 npm**：
 
 ```bash
 dsh plugin --profile web add dsh-plugin-skill-flow

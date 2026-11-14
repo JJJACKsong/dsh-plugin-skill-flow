@@ -4,6 +4,14 @@
 
 暂无。
 
+## 0.1.1 — 2026-11-14
+
+- 发布到 npm：`dsh-plugin-skill-flow`（`latest` 指向本版本），README 中英双版同步安装说明；
+  GitHub Release 同时提供 `dsh-plugin-skill-flow-0.1.1.tgz` 与 `SHA256SUMS`。
+- 修正 `verify-release` 对 npm 11+ `npm pack --json` 输出结构的硬编码假设
+  （新版返回 `{ "<包名>": { files } }`），本机与 CI 都能实测发布清单。
+- 功能与 0.1.0 一致，无行为变更。
+
 ## 0.1.0 — 2026-11-05
 
 首次公开下载，通过 GitHub Release 提供安装包与 SHA256 校验值；尚未发布到 npm。包含此前本地迭代并已验收的功能：

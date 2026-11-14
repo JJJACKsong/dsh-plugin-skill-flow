@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-skill-flow",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Visualize and edit the node flow of workflow skills in DeepSeek Harness — one flow.json next to each SKILL.md, plus loose-skill scan and cross-workspace checks. 可视化管理工作区里的技能与工作流。",
   "type": "module",
   "main": "lib/index.js",
