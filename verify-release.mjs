@@ -251,7 +251,10 @@ function packedFiles(tmpDir) {
   } catch {
     return { ok: false, reason: 'npm pack 输出不是 JSON' }
   }
-  const entry = Array.isArray(parsed) ? parsed[0] : parsed
+  // npm 10 输出 `[{ files: [...] }]`；npm 11 输出 `{ "<package name>": { files: [...] } }`。
+  const entry = Array.isArray(parsed)
+    ? parsed[0]
+    : (parsed?.files ? parsed : Object.values(parsed ?? {})[0])
   const files = (entry?.files ?? []).map((item) => item.path)
   if (files.length === 0) return { ok: false, reason: 'npm pack 没返回文件列表' }
   return { ok: true, files }
